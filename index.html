@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>Qantum Browser</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--text:#e6eef6}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans",sans-serif;background:var(--bg);color:var(--text)}
+
+    /* Top address bar */
+    .topbar{display:flex;gap:8px;padding:10px;background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);align-items:center}
+    .logo{font-weight:700;margin-right:6px}
+    .address-form{flex:1;display:flex;gap:8px}
+    .address-form input{flex:1;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);color:var(--text);outline:none}
+    .btn{padding:8px 12px;border-radius:8px;border:none;background:var(--accent);color:#042027;font-weight:600;cursor:pointer}
+    .small-btn{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:var(--text);cursor:pointer}
+
+    /* Webview area */
+    #webwrap{height:calc(100% - 64px);display:flex;flex-direction:column}
+    iframe{flex:1;border:none;width:100%;background:white}
+
+    /* Welcome overlay (full-screen) */
+    .welcome-overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,rgba(2,6,23,0.85),rgba(2,6,23,0.95));z-index:999}
+    .welcome-card{max-width:720px;width:94%;background:var(--card);padding:24px;border-radius:14px;box-shadow:0 8px 30px rgba(2,6,23,0.6);text-align:center}
+    .welcome-card h1{margin:0 0 8px;font-size:24px}
+    .welcome-card p{margin:6px 0 18px;line-height:1.45;color:rgba(230,238,246,0.9)}
+    .welcome-note{font-size:13px;color:rgba(230,238,246,0.7);margin-bottom:18px}
+
+    @media (max-width:520px){.welcome-card{padding:18px;border-radius:12px}.address-form input{padding:9px}.btn{padding:9px 10px}}
+
+    .hint{font-size:12px;color:rgba(230,238,246,0.6);margin-top:10px}
+  </style>
+</head>
+<body>
+  <!-- Top bar (address + controls) -->
+  <div class="topbar">
+    <div class="logo">LB</div>
+    <button id="backBtn" class="small-btn" title="Back">◀</button>
+    <button id="forwardBtn" class="small-btn" title="Forward">▶</button>
+    <button id="reloadBtn" class="small-btn" title="Reload">⟳</button>
+
+    <form id="addressForm" class="address-form" autocomplete="off">
+      <input id="addressInput" type="text" placeholder="https://example.com — type a URL and press Enter" aria-label="URL" />
+      <button class="btn" type="submit">Go</button>
+    </form>
+  </div>
+
+  <!-- Webview container (simple iframe-based) -->
+  <div id="webwrap">
+    <iframe id="webview" src="about:blank" sandbox="allow-forms allow-scripts allow-popups allow-same-origin"></iframe>
+  </div>
+
+  <!-- Welcome overlay: shows only once (first app open) -->
+  <div id="welcome" class="welcome-overlay" role="dialog" aria-modal="true">
+    <div class="welcome-card">
+      <h1>Thank You for Joining Qantum Browser!</h1>
+      <p class="welcome-note">Experience fast, secure browsing—made for you.
+
+This is our first release. More features, AI browser, and smart AI apps coming soon!
+
+Your journey starts here.</p>
+      <div style="margin-top:18px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button id="getStarted" class="btn">Get Started</button>
+      </div>
+      <p class="hint">You’ll see this welcome just once—making your first launch special.</code></p>
+    </div>
+  </div>
+
+  <script>
+    // --- Config ---
+    const WELCOME_KEY = 'Qantum Browser';
+    // Set your desired homepage here:
+    const HOME = 'https://www.google.com';
+
+    // Helper: sites known to block iframe embedding (common list)
+    const BLOCKS_IFRAME = ['google.com', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 'docs.google.com'];
+
+    // --- Elements ---
+    const welcome = document.getElementById('welcome');
+    const getStarted = document.getElementById('getStarted');
+    const addressForm = document.getElementById('addressForm');
+    const addressInput = document.getElementById('addressInput');
+    const webview = document.getElementById('webview');
+    const backBtn = document.getElementById('backBtn');
+    const forwardBtn = document.getElementById('forwardBtn');
+    const reloadBtn = document.getElementById('reloadBtn');
+
+    let historyStack = [];
+    let historyIndex = -1;
+
+    // --- Welcome logic ---
+    function hideWelcome() {
+      welcome.style.display = 'none';
+      try { localStorage.setItem(WELCOME_KEY, 'shown'); } catch(e) { /* storage not available */ }
+    }
+
+    try {
+      const shown = localStorage.getItem(WELCOME_KEY);
+      if (!shown) {
+        welcome.style.display = 'flex';
+      } else {
+        welcome.style.display = 'none';
+      }
+    } catch(e) {
+      welcome.style.display = 'flex';
+    }
+
+    // When Get Started clicked: hide welcome and open homepage appropriately
+    getStarted.addEventListener('click', () => {
+      hideWelcome();
+      // If homepage likely blocks iframe, open in new tab/window; otherwise load in iframe
+      if (shouldOpenExternally(HOME)) {
+        window.open(HOME, '_blank');
+      } else {
+        navigateTo(HOME, true);
+      }
+    });
+
+    welcome.addEventListener('click', (ev) => {
+      if (ev.target === welcome) hideWelcome();
+    });
+
+    // --- URL handling/navigation ---
+    function normalizeUrl(input) {
+      input = input.trim();
+      if (!input) return '';
+      if (!/^https?:\/\//i.test(input)) input = 'https://' + input;
+      return input;
+    }
+
+    function hostFromUrl(url) {
+      try {
+        return new URL(url).hostname;
+      } catch (e) { return ''; }
+    }
+
+    function shouldOpenExternally(url) {
+      const host = hostFromUrl(url).toLowerCase();
+      return BLOCKS_IFRAME.some(block => host.includes(block));
+    }
+
+    function navigateTo(url, addToStack = true) {
+      if (!url) return;
+      addressInput.value = url;
+      // If site likely blocks iframe, open externally instead
+      if (shouldOpenExternally(url)) {
+        window.open(url, '_blank');
+        // still update history so back/forward make sense for user inputs
+        if (addToStack) {
+          historyStack = historyStack.slice(0, historyIndex + 1);
+          historyStack.push(url);
+          historyIndex = historyStack.length - 1;
+          updateButtons();
+        }
+        return;
+      }
+      webview.src = url;
+      if (addToStack) {
+        historyStack = historyStack.slice(0, historyIndex + 1);
+        historyStack.push(url);
+        historyIndex = historyStack.length - 1;
+        updateButtons();
+      }
+    }
+
+    addressForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const raw = addressInput.value;
+      const url = normalizeUrl(raw);
+      if (url) navigateTo(url, true);
+    });
+
+    backBtn.addEventListener('click', () => {
+      if (historyIndex > 0) {
+        historyIndex -= 1;
+        const url = historyStack[historyIndex];
+        // If the previous entry blocks iframe, open externally
+        if (shouldOpenExternally(url)) {
+          window.open(url, '_blank');
+        } else {
+          navigateTo(url, false);
+        }
+        updateButtons();
+      }
+    });
+
+    forwardBtn.addEventListener('click', () => {
+      if (historyIndex < historyStack.length - 1) {
+        historyIndex += 1;
+        const url = historyStack[historyIndex];
+        if (shouldOpenExternally(url)) {
+          window.open(url, '_blank');
+        } else {
+          navigateTo(url, false);
+        }
+        updateButtons();
+      }
+    });
+
+    reloadBtn.addEventListener('click', () => {
+      // reload current iframe src
+      webview.src = webview.src;
+    });
+
+    function updateButtons() {
+      backBtn.disabled = historyIndex <= 0;
+      forwardBtn.disabled = historyIndex >= historyStack.length - 1;
+      backBtn.style.opacity = backBtn.disabled ? '0.45' : '1';
+      forwardBtn.style.opacity = forwardBtn.disabled ? '0.45' : '1';
+    }
+
+    // If welcome already shown before page load, auto-open homepage (in iframe or external)
+    try {
+      if (localStorage.getItem(WELCOME_KEY)) {
+        if (shouldOpenExternally(HOME)) window.open(HOME, '_blank');
+        else navigateTo(HOME, true);
+      }
+    } catch(e){ /* ignore */ }
+
+    // Keyboard shortcut: Ctrl/Cmd+L focuses address bar
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l') {
+        e.preventDefault(); addressInput.focus(); addressInput.select();
+      }
+    });
+
+    // Try to sync address bar on iframe load when same-origin (safe-guard)
+    webview.addEventListener('load', () => {
+      try {
+        const current = webview.contentWindow.location.href;
+        addressInput.value = current;
+        if (historyIndex >= 0) historyStack[historyIndex] = current;
+      } catch(err) {
+        // cross-origin — cannot read
+      }
+    });
+
+  </script>
+</body>
+</html>
